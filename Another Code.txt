@@ -1,0 +1,288 @@
+/*
+ * This file is part of the µOS++ distribution.
+ *   (https://github.com/micro-os-plus)
+ * Copyright (c) 2014 Liviu Ionescu.
+ *
+ * Permission is hereby granted, free of charge, to any person
+ * obtaining a copy of this software and associated documentation
+ * files (the "Software"), to deal in the Software without
+ * restriction, including without limitation the rights to use,
+ * copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom
+ * the Software is furnished to do so, subject to the following
+ * conditions:
+ *
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+ * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+ * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+// ----------------------------------------------------------------------------
+// Hello World From Comments
+#include <stdio.h>
+#include <stdlib.h>
+#include "diag/trace.h"
+
+/* Kernel includes. */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "queue.h"
+#include "timers.h"
+#include "semphr.h"
+
+#define CCM_RAM __attribute__((section(".ccmram")))
+
+/*-----------------------------------------------------------*/
+// ----------------------------------------------------------------------------
+//
+// Semihosting STM32F4 empty sample (trace via DEBUG).
+//
+// Trace support is enabled by adding the TRACE macro definition.
+// By default the trace messages are forwarded to the DEBUG output,
+// but can be rerouted to any device or completely suppressed, by
+// changing the definitions required in system/src/diag/trace-impl.c
+// (currently OS_USE_TRACE_ITM, OS_USE_TRACE_SEMIHOSTING_DEBUG/_STDOUT).
+//
+
+// ----- main() ---------------------------------------------------------------
+
+// Sample pragmas to cope with warnings. Please note the related line at
+// the end of this function, used to pop the compiler diagnostics status.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wmissing-declarations"
+#pragma GCC diagnostic ignored "-Wreturn-type"
+
+SemaphoreHandle_t semTestReceiver = NULL;
+SemaphoreHandle_t semTests[] = {NULL, NULL, NULL};
+
+TimerHandle_t timerTestReceiver = NULL;
+TimerHandle_t timerTests[] = {NULL, NULL, NULL};
+
+QueueHandle_t mssgQueue = NULL;
+int queueSize = 3;
+
+int lower[] = {500, 800, 1100, 1400, 1700, 2000};
+int upper[] = {1500, 2000, 2500, 3000, 3500, 4000};
+int current = 0;
+int countTransmitted = 0, countBlocked = 0, countReceived = 0;
+
+int randomNum(int lower, int upper) {
+	int randomNumber;
+	do {
+		randomNumber = rand();
+	} while (randomNumber < lower || randomNumber > upper);
+
+	return randomNumber;
+}
+
+void clearQueue() {
+	TickType_t dummyBuffer;
+	BaseType_t isNotEmpty;
+	do {
+		isNotEmpty = xQueueReceive(mssgQueue, &dummyBuffer, 0);
+	} while (isNotEmpty);
+
+	trace_puts("Queue Emptied Successfully!");
+}
+
+void reinitialize() {
+	countTransmitted = 0;
+	countBlocked = 0;
+	countReceived = 0;
+	clearQueue();
+	current++;
+
+	trace_puts("Reinitialized Successfully!");
+	if (current == 6) {
+		xTimerDelete(timerTestReceiver, 0);
+		for (int i = 0; i < 3; i++) xTimerDelete(timerTests[i], 0);
+		printf("Game Over!!\n");
+		vTaskEndScheduler();
+	}
+}
+
+void testTask(void* ptr) {
+	int taskNumber = (int)ptr;
+	while (1) {
+		xSemaphoreTake(semTests[taskNumber], portMAX_DELAY);
+		printf("Task %d Resumed at %d!\n", taskNumber, xTaskGetTickCount());
+		TickType_t mssg = xTaskGetTickCount();
+		BaseType_t sent = xQueueSend(mssgQueue, &mssg, 0);
+		if (sent == pdPASS) {
+			printf("Task %d Sent Message Successfully!\n", taskNumber);
+			countTransmitted++;
+		} else {
+			printf("Task %d Failed to Send Message!\n", taskNumber);
+			countBlocked++;
+		}
+	}
+}
+
+void testReceiverTask(void* ptr) {
+	while (1) {
+		xSemaphoreTake(semTestReceiver, portMAX_DELAY);
+		printf("Receiver Task Resumed at %d!\n", xTaskGetTickCount());
+		TickType_t mssg;
+		BaseType_t received = xQueueReceive(mssgQueue, &mssg, 0);
+		if (received == pdPASS) {
+			printf("Received %d From Queue!\n", mssg);
+			countReceived++;
+		}
+		else printf("Queue Is Empty\n");
+	}
+}
+
+void test0TimerCallback() {
+	xSemaphoreGive(semTests[0]);
+	xTimerChangePeriod(timerTests[0], pdMS_TO_TICKS(randomNum(lower[current], upper[current])), 0);
+}
+
+void test1TimerCallback() {
+	xSemaphoreGive(semTests[1]);
+	xTimerChangePeriod(timerTests[1], pdMS_TO_TICKS(randomNum(lower[current], upper[current])), 0);
+}
+
+void test2TimerCallback() {
+	xSemaphoreGive(semTests[2]);
+	xTimerChangePeriod(timerTests[2], pdMS_TO_TICKS(randomNum(lower[current], upper[current])), 0);
+}
+
+void testReceiverTimerCallback() {
+	printf("#Transmitted = %d, #Blocked = %d, #Received = %d\n", countTransmitted, countBlocked, countReceived);
+	if (countReceived == 100) {
+		vTaskEndScheduler();
+		xTimerDelete(timerTestReceiver, 0);
+		xTimerDelete(timerTests[0], 0);
+		xTimerDelete(timerTests[1], 0);
+		xTimerDelete(timerTests[2], 0);
+		printf("#Transmitted = %d, #Blocked = %d, #Received = %d\n", countTransmitted, countBlocked, countReceived);
+		printf("Game Over!");
+	}
+	xSemaphoreGive(semTestReceiver);
+}
+
+int main(int argc, char* argv[]) {
+	trace_puts("Hello World!");
+	srand((unsigned int)time(NULL));
+
+	// Creating Semaphores
+	semTests[0] = xSemaphoreCreateBinary();
+	semTests[1] = xSemaphoreCreateBinary();
+	semTests[2] = xSemaphoreCreateBinary();
+	semTestReceiver = xSemaphoreCreateBinary();
+
+	// Creating Queues
+	mssgQueue = xQueueCreate(queueSize, sizeof(TickType_t));
+
+	// Creating Timers
+	printf("Current Lower Bound = %d and Current Upper Bound = %d\n", lower[current], upper[current]);
+	timerTests[0] = xTimerCreate("Test0Timer", pdMS_TO_TICKS(randomNum(lower[current], upper[current])), pdTRUE, 0, test0TimerCallback);
+	timerTests[1] = xTimerCreate("Test1Timer", pdMS_TO_TICKS(randomNum(lower[current], upper[current])), pdTRUE, 0, test1TimerCallback);
+	timerTests[2] = xTimerCreate("Test2Timer", pdMS_TO_TICKS(randomNum(lower[current], upper[current])), pdTRUE, 0, test2TimerCallback);
+	timerTestReceiver = xTimerCreate("TestReceiverTimer", pdMS_TO_TICKS(1000), pdTRUE, 0, testReceiverTimerCallback);
+
+	// Creating Tasks
+	xTaskCreate(testTask, "Test0Task", 1000, (void *) 0, 1, NULL);
+	xTaskCreate(testTask, "Test1Task", 1000, (void *) 1, 1, NULL);
+	xTaskCreate(testTask, "Test2Task", 1000, (void *) 2, 2, NULL);
+	xTaskCreate(testReceiverTask, "TestReceiverTask", 1000, NULL, 3, NULL);
+
+	// Starting Timers
+	xTimerStart(timerTests[0], 0);
+	xTimerStart(timerTests[1], 0);
+	xTimerStart(timerTests[2], 0);
+	xTimerStart(timerTestReceiver, 0);
+
+	// Start the Scheduler
+	vTaskStartScheduler();
+
+	return 0;
+}
+
+#pragma GCC diagnostic pop
+
+// ----------------------------------------------------------------------------
+
+
+void vApplicationMallocFailedHook( void )
+{
+	/* Called if a call to pvPortMalloc() fails because there is insufficient
+	free memory available in the FreeRTOS heap.  pvPortMalloc() is called
+	internally by FreeRTOS API functions that create tasks, queues, software
+	timers, and semaphores.  The size of the FreeRTOS heap is set by the
+	configTOTAL_HEAP_SIZE configuration constant in FreeRTOSConfig.h. */
+	for( ;; );
+}
+/*-----------------------------------------------------------*/
+
+void vApplicationStackOverflowHook( TaskHandle_t pxTask, char *pcTaskName )
+{
+	( void ) pcTaskName;
+	( void ) pxTask;
+
+	/* Run time stack overflow checking is performed if
+	configconfigCHECK_FOR_STACK_OVERFLOW is defined to 1 or 2.  This hook
+	function is called if a stack overflow is detected. */
+	for( ;; );
+}
+/*-----------------------------------------------------------*/
+
+void vApplicationIdleHook( void )
+{
+volatile size_t xFreeStackSpace;
+
+	/* This function is called on each cycle of the idle task.  In this case it
+	does nothing useful, other than report the amout of FreeRTOS heap that
+	remains unallocated. */
+	xFreeStackSpace = xPortGetFreeHeapSize();
+
+	if( xFreeStackSpace > 100 )
+	{
+		/* By now, the kernel has allocated everything it is going to, so
+		if there is a lot of heap remaining unallocated then
+		the value of configTOTAL_HEAP_SIZE in FreeRTOSConfig.h can be
+		reduced accordingly. */
+	}
+}
+
+void vApplicationTickHook(void) {
+}
+
+StaticTask_t xIdleTaskTCB CCM_RAM;
+StackType_t uxIdleTaskStack[configMINIMAL_STACK_SIZE] CCM_RAM;
+
+void vApplicationGetIdleTaskMemory(StaticTask_t **ppxIdleTaskTCBBuffer, StackType_t **ppxIdleTaskStackBuffer, uint32_t *pulIdleTaskStackSize) {
+  /* Pass out a pointer to the StaticTask_t structure in which the Idle task's
+  state will be stored. */
+  *ppxIdleTaskTCBBuffer = &xIdleTaskTCB;
+
+  /* Pass out the array that will be used as the Idle task's stack. */
+  *ppxIdleTaskStackBuffer = uxIdleTaskStack;
+
+  /* Pass out the size of the array pointed to by *ppxIdleTaskStackBuffer.
+  Note that, as the array is necessarily of type StackType_t,
+  configMINIMAL_STACK_SIZE is specified in words, not bytes. */
+  *pulIdleTaskStackSize = configMINIMAL_STACK_SIZE;
+}
+
+static StaticTask_t xTimerTaskTCB CCM_RAM;
+static StackType_t uxTimerTaskStack[configTIMER_TASK_STACK_DEPTH] CCM_RAM;
+
+/* configUSE_STATIC_ALLOCATION and configUSE_TIMERS are both set to 1, so the
+application must provide an implementation of vApplicationGetTimerTaskMemory()
+to provide the memory that is used by the Timer service task. */
+void vApplicationGetTimerTaskMemory(StaticTask_t **ppxTimerTaskTCBBuffer, StackType_t **ppxTimerTaskStackBuffer, uint32_t *pulTimerTaskStackSize) {
+  *ppxTimerTaskTCBBuffer = &xTimerTaskTCB;
+  *ppxTimerTaskStackBuffer = uxTimerTaskStack;
+  *pulTimerTaskStackSize = configTIMER_TASK_STACK_DEPTH;
+}
+
